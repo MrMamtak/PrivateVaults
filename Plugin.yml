@@ -1,0 +1,31 @@
+name: PrivateVaults
+version: '1.0'
+main: vault.mamtak.privateVaults.PrivateVaults
+api-version: '1.21'
+authors:
+  - Mamtak
+
+commands:
+  pv:
+    description: Open your private vault or reload config if you’re OP
+    usage: /pv <number> or /pv reload
+
+permissions:
+  mamtak.pv.normal:
+    description: Allows access to defined number of “normal” vaults (configurable)
+    default: true
+  mamtak.pv.advanced:
+    description: Allows access to defined number of “advanced” vaults (configurable)
+    default: false
+  mamtak.pv.rich:
+    description: Allows access to defined number of “rich” vaults (configurable)
+    default: false
+  mamtak.pv.moderator:
+    description: Allows access to defined number of “moderator” vaults (configurable)
+    default: false
+  mamtak.pv.admin:
+    description: Allows access to defined number of “admin” vaults (configurable)
+    default: false
+  mamtak.pv.owner:
+    description: Allows access to unlimited vaults
+    default: false
