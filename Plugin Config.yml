@@ -1,0 +1,10 @@
+# Define how many vaults each permission allows:
+vault-limits:
+  normal: 2
+  advanced: 4
+  rich: 6
+  moderator: 8
+  admin: 12
+  owner: 0  # 0 means “infinite”
+
+# Vault data is saved per-player in separate files under plugins/PrivateVaults/vaults/
