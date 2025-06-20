@@ -1,6 +1,6 @@
 # plugin.yml
 name: PrivateVaults
-version: '2.0'
+version: '1.2'
 main: vault.mamtak.privateVaults.PrivateVaults
 api-version: '1.21'
 authors:
@@ -9,7 +9,7 @@ authors:
 commands:
   pv:
     description: Open a private vault, list available vaults, or reload config
-    usage: /pv <number> [player] | /pv list [player] | /pv reload
+    usage: /pv <number> [player] | /pv list [player] | /pv reload | /pv gui
 
 permissions:
   mamtak.pv.normal:
