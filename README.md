@@ -13,7 +13,7 @@ Instead of bloating a central config file, each vault is saved to its own YAML f
 * **`/pv list`**: List all vault numbers you can access.
 * **`/pv list <player>`**: (Admin only — requires `mamtak.pv.adminaccess`) List another player’s vaults.
 * **`/pv reload`**: (OP only) Reloads `config.yml` on the fly without restarting.
-
+* **`/pv gui <player> `**: Opens a multipage gui of the player vaults.
 ---
 
 ## 📥 Installation
