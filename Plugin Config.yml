@@ -1,10 +1,31 @@
-# Define how many vaults each permission allows:
+# config.yml
+
+# How many vaults each permission tier can access (0 = unlimited for owner)
 vault-limits:
   normal: 2
   advanced: 4
   rich: 6
   moderator: 8
   admin: 12
-  owner: 0  # 0 means “infinite”
+  owner: 0
 
-# Vault data is saved per-player in separate files under plugins/PrivateVaults/vaults/
+# Default vault size in slots (must be a multiple of 9)
+default-vault-size: 32
+
+# Optional per-vault size overrides (slot count must be a multiple of 9)
+vault-sizes:
+  1: 32
+  2: 32
+  3: 32
+  4: 32
+  5: 32
+  6: 32
+  7: 32
+  8: 32
+  9: 32
+  10: 32
+  11: 32
+  12: 32
+
+# Vault data is stored as separate files under plugins/PrivateVaults/vaults/
+# (<UUID>_<vault#>.yml)
