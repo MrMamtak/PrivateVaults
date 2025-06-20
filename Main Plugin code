@@ -2,17 +2,15 @@ package vault.mamtak.privateVaults;
 
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
-import org.bukkit.OfflinePlayer;
-import org.bukkit.command.Command;
-import org.bukkit.command.CommandSender;
-import org.bukkit.command.TabCompleter;
+import org.bukkit.Material;
+import org.bukkit.command.*;
+import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
-import org.bukkit.event.inventory.InventoryCloseEvent;
-import org.bukkit.inventory.Inventory;
-import org.bukkit.inventory.ItemStack;
-import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.event.inventory.*;
+import org.bukkit.inventory.*;
+import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.util.StringUtil;
 
@@ -21,25 +19,36 @@ import java.io.IOException;
 import java.util.*;
 
 public final class PrivateVaults extends JavaPlugin implements Listener, TabCompleter {
-
     private File vaultsFolder;
-    private final Map<UUID, Map<Integer, Inventory>> openVaultsByOwner = new HashMap<>();
-    private final Map<Inventory, UUID> openVaultOwners = new HashMap<>();
-    private final Map<Inventory, Integer> openVaultNumbers = new HashMap<>();
-    private final Map<Inventory, Set<UUID>> inventoryViewers = new HashMap<>();
+
+    // Vault data tracking
+    private final Map<Inventory, UUID>        openVaultOwners   = new HashMap<>();
+    private final Map<Inventory, Integer>     openVaultNumbers  = new HashMap<>();
+    private final Map<Inventory, Set<UUID>>   inventoryViewers  = new HashMap<>();
+    private final Map<UUID, Map<Integer,Inventory>> openVaultsByOwner = new HashMap<>();
+
+    // GUI paging support
+    private final Map<Inventory, OwnerPage>   guiMap            = new HashMap<>();
+    private final Map<Inventory, Set<UUID>>   guiViewers        = new HashMap<>();
+
+    private static class OwnerPage {
+        final UUID owner;
+        final int page;
+        OwnerPage(UUID o, int p) { owner = o; page = p; }
+    }
 
     @Override
     public void onEnable() {
         saveDefaultConfig();
         vaultsFolder = new File(getDataFolder(), "vaults");
-        if (!vaultsFolder.exists()) vaultsFolder.mkdirs();
+        vaultsFolder.mkdirs();
         getServer().getPluginManager().registerEvents(this, this);
         Objects.requireNonNull(getCommand("pv")).setTabCompleter(this);
     }
 
     @Override
     public void onDisable() {
-        // Save all open vaults on shutdown
+        // Save any open vaults
         for (Inventory inv : new ArrayList<>(openVaultOwners.keySet())) {
             saveVault(inv);
         }
@@ -47,205 +56,238 @@ public final class PrivateVaults extends JavaPlugin implements Listener, TabComp
 
     @Override
     public boolean onCommand(CommandSender sender, Command cmd, String label, String[] args) {
-        // /pv reload
+        // --- reload ---
         if (args.length == 1 && args[0].equalsIgnoreCase("reload")) {
-            if (sender.isOp()) {
+            if (!sender.isOp()) {
+                sender.sendMessage(ChatColor.RED + "You must be an operator to reload.");
+            } else {
                 reloadConfig();
                 sender.sendMessage(ChatColor.GREEN + "Config reloaded.");
-            } else {
-                sender.sendMessage(ChatColor.RED + "Only operators can reload.");
             }
             return true;
         }
 
-        // /pv list [player]
+        // --- gui ---
+        if (args.length >= 1 && args[0].equalsIgnoreCase("gui")) {
+            UUID ownerUuid;
+            if (args.length == 1) {
+                if (!(sender instanceof Player)) {
+                    sender.sendMessage(ChatColor.RED + "Players only: /pv gui");
+                    return true;
+                }
+                ownerUuid = ((Player) sender).getUniqueId();
+            } else {
+                if (!sender.hasPermission("mamtak.pv.adminaccess")) {
+                    sender.sendMessage(ChatColor.RED + "You lack permission mamtak.pv.adminaccess.");
+                    return true;
+                }
+                Player tgt = Bukkit.getPlayerExact(args[1]);
+                if (tgt == null) {
+                    sender.sendMessage(ChatColor.RED + "That player is not online.");
+                    return true;
+                }
+                ownerUuid = tgt.getUniqueId();
+            }
+            Player owner = Bukkit.getPlayer(ownerUuid);
+            if (owner != null && owner.hasPermission("mamtak.pv.owner")) {
+                sender.sendMessage(ChatColor.RED + "Cannot open GUI for infinite vaults owner.");
+                return true;
+            }
+            Player viewer = (sender instanceof Player) ? (Player) sender : null;
+            openVaultsGui(ownerUuid, viewer, 0);
+            return true;
+        }
+
+        // --- list ---
         if (args.length >= 1 && args[0].equalsIgnoreCase("list")) {
             Player target;
             if (args.length == 1) {
                 if (!(sender instanceof Player)) {
-                    sender.sendMessage(ChatColor.RED + "Only players can list their vaults.");
+                    sender.sendMessage(ChatColor.RED + "Players only: /pv list");
                     return true;
                 }
                 target = (Player) sender;
             } else {
                 if (!sender.hasPermission("mamtak.pv.adminaccess")) {
-                    sender.sendMessage(ChatColor.RED + "No permission to list others' vaults.");
+                    sender.sendMessage(ChatColor.RED + "You lack permission mamtak.pv.adminaccess.");
                     return true;
                 }
                 target = Bukkit.getPlayerExact(args[1]);
                 if (target == null) {
-                    sender.sendMessage(ChatColor.RED + "Player not found.");
+                    sender.sendMessage(ChatColor.RED + "That player is not online.");
                     return true;
                 }
+            }
+            if (target.hasPermission("mamtak.pv.owner")) {
+                sender.sendMessage(ChatColor.RED + "Cannot list infinite vaults owner.");
+                return true;
             }
             listVaults(sender, target);
             return true;
         }
 
-        // /pv <number> [player]
+        // --- open vault ---
         if (args.length >= 1) {
-            int vaultNumber;
+            int num;
             try {
-                vaultNumber = Integer.parseInt(args[0]);
+                num = Integer.parseInt(args[0]);
             } catch (NumberFormatException e) {
-                sender.sendMessage(ChatColor.RED + "Invalid vault number.");
+                sender.sendMessage(ChatColor.RED + "Vault number must be numeric.");
                 return true;
             }
-
             Player viewer;
             UUID ownerUuid;
             if (args.length == 1) {
-                // Opening own vault
                 if (!(sender instanceof Player)) {
-                    sender.sendMessage(ChatColor.RED + "Only players can open vaults.");
+                    sender.sendMessage(ChatColor.RED + "Players only: /pv <number>");
                     return true;
                 }
                 viewer = (Player) sender;
                 ownerUuid = viewer.getUniqueId();
                 int max = determineMaxVaults(viewer);
-                if (vaultNumber < 1 || vaultNumber > max) {
-                    sender.sendMessage(ChatColor.RED + "You don’t have access to that vault.");
+                if (max != 0 && (num < 1 || num > max)) {
+                    sender.sendMessage(ChatColor.RED + "You lack permission to open vault #" + num + ".");
                     return true;
                 }
             } else {
-                // Opening someone else's vault
                 if (!sender.hasPermission("mamtak.pv.adminaccess")) {
-                    sender.sendMessage(ChatColor.RED + "No permission to open others' vaults.");
+                    sender.sendMessage(ChatColor.RED + "You lack permission mamtak.pv.adminaccess.");
                     return true;
                 }
+                Player tgt = Bukkit.getPlayerExact(args[1]);
+                if (tgt == null) {
+                    sender.sendMessage(ChatColor.RED + "That player is not online.");
+                    return true;
+                }
+                ownerUuid = tgt.getUniqueId();
                 viewer = (sender instanceof Player) ? (Player) sender : null;
-                Player target = Bukkit.getPlayerExact(args[1]);
-                if (target == null) {
-                    sender.sendMessage(ChatColor.RED + "Player not found.");
-                    return true;
-                }
-                ownerUuid = target.getUniqueId();
-                int max = determineMaxVaults(target);
-                if (vaultNumber < 1 || vaultNumber > max) {
-                    sender.sendMessage(ChatColor.RED + target.getName() + " doesn’t have that vault.");
+                int max = determineMaxVaults(tgt);
+                if (max != 0 && (num < 1 || num > max)) {
+                    sender.sendMessage(ChatColor.RED + tgt.getName() + " has no vault #" + num + ".");
                     return true;
                 }
             }
-
-            openVault(viewer, ownerUuid, vaultNumber);
+            openVault(viewer, ownerUuid, num);
             return true;
         }
 
-        sender.sendMessage(ChatColor.RED + "Usage: /pv <number> [player] | /pv list [player] | /pv reload");
+        sender.sendMessage(ChatColor.RED + "Usage: /pv <#> [player] | list [player] | gui [player] | reload");
         return true;
     }
 
-    // Tab completion: first arg only "reload" and "list"; second arg player names
+    // --- Tab completion ---
     @Override
     public List<String> onTabComplete(CommandSender sender, Command cmd, String alias, String[] args) {
         if (!cmd.getName().equalsIgnoreCase("pv")) return Collections.emptyList();
         if (args.length == 1) {
-            return filter(Arrays.asList("reload", "list"), args[0]);
+            return filter(Arrays.asList("reload", "list", "gui"), args[0]);
         }
-        if (args.length == 2 && (args[0].equalsIgnoreCase("list") || isNumeric(args[0]))) {
-            List<String> players = new ArrayList<>();
-            for (Player p : Bukkit.getOnlinePlayers()) {
-                players.add(p.getName());
-            }
-            return filter(players, args[1]);
+        if (args.length == 2 && (args[0].equalsIgnoreCase("list") || args[0].equalsIgnoreCase("gui"))) {
+            List<String> names = new ArrayList<>();
+            for (Player p : Bukkit.getOnlinePlayers()) names.add(p.getName());
+            return filter(names, args[1]);
         }
         return Collections.emptyList();
     }
 
-    private List<String> filter(List<String> list, String token) {
-        List<String> result = new ArrayList<>();
-        StringUtil.copyPartialMatches(token, list, result);
-        Collections.sort(result);
-        return result;
-    }
+    // --- Fancy paged GUI ---
+    private void openVaultsGui(UUID ownerUuid, Player viewer, int page) {
+        Player owner = Bukkit.getPlayer(ownerUuid);
+        if (owner == null) return;
+        int max = determineMaxVaults(owner);
+        int perPage = 21; // 3 rows × 7 cols
+        int pages = Math.max(1, (int) Math.ceil(max / (double) perPage));
+        page = Math.max(0, Math.min(page, pages - 1));
 
-    private boolean isNumeric(String s) {
-        try {
-            Integer.parseInt(s);
-            return true;
-        } catch (NumberFormatException e) {
-            return false;
-        }
-    }
-
-    private void listVaults(CommandSender sender, Player target) {
-        int max = determineMaxVaults(target);
-        StringBuilder sb = new StringBuilder();
-        for (int i = 1; i <= max; i++) {
-            sb.append(i).append(", ");
-        }
-        if (sb.length() >= 2) sb.setLength(sb.length() - 2);
-        String header = ChatColor.GOLD + (sender.equals(target)
-                ? "Your vaults: "
-                : target.getName() + "'s vaults: ");
-        sender.sendMessage(header + ChatColor.GREEN + sb);
-    }
-
-    private int determineMaxVaults(Player player) {
-        int max = getConfig().getInt("vault-limits.normal", 2);
-        if (player.hasPermission("mamtak.pv.advanced"))
-            max = Math.max(max, getConfig().getInt("vault-limits.advanced", 4));
-        if (player.hasPermission("mamtak.pv.rich"))
-            max = Math.max(max, getConfig().getInt("vault-limits.rich", 6));
-        if (player.hasPermission("mamtak.pv.moderator"))
-            max = Math.max(max, getConfig().getInt("vault-limits.moderator", 8));
-        if (player.hasPermission("mamtak.pv.admin"))
-            max = Math.max(max, getConfig().getInt("vault-limits.admin", 12));
-        if (player.hasPermission("mamtak.pv.owner"))
-            return Integer.MAX_VALUE;
-        return max;
-    }
-
-    private int getVaultSize(int vaultNumber) {
-        int size = getConfig().getInt(
-                "vault-sizes." + vaultNumber,
-                getConfig().getInt("default-vault-size", 32)
+        // 6 rows = 54 slots
+        Inventory gui = Bukkit.createInventory(null, 54,
+                ChatColor.DARK_PURPLE + owner.getName() + "'s Vaults (" + (page+1) + "/" + pages + ")"
         );
-        size = Math.max(9, Math.min(54, size));
-        if (size % 9 != 0) {
-            size = ((size / 9) + 1) * 9;
-        }
-        return size;
-    }
 
-    private Inventory getOrCreateVault(UUID ownerUuid, int vaultNumber) {
-        Map<Integer, Inventory> byNumber = openVaultsByOwner
-                .computeIfAbsent(ownerUuid, k -> new HashMap<>());
-        if (byNumber.containsKey(vaultNumber)) {
-            return byNumber.get(vaultNumber);
+        // Decorative border (gray pane)
+        ItemStack pane = new ItemStack(Material.GRAY_STAINED_GLASS_PANE);
+        ItemMeta pm = pane.getItemMeta();
+        pm.setDisplayName(" ");
+        pane.setItemMeta(pm);
+        for (int i = 0; i < 54; i++) {
+            if (i < 9 || i % 9 == 0 || i % 9 == 8 || i > 44) {
+                gui.setItem(i, pane);
+            }
         }
 
-        int size = getVaultSize(vaultNumber);
-        Inventory inv = Bukkit.createInventory(null, size, ChatColor.GREEN + "Vault " + vaultNumber);
+        // Vault slots layout (3×7 grid starting at slot 10)
+        int[] slots = {
+                10,11,12,13,14,15,16,
+                19,20,21,22,23,24,25,
+                28,29,30,31,32,33,34
+        };
 
-        File vaultFile = new File(vaultsFolder, ownerUuid + "_" + vaultNumber + ".yml");
-        YamlConfiguration vcfg = YamlConfiguration.loadConfiguration(vaultFile);
-        for (int i = 0; i < size; i++) {
-            ItemStack item = vcfg.getItemStack("slot." + i);
-            if (item != null) inv.setItem(i, item);
+        int start = page * perPage;
+        for (int i = 0; i < perPage; i++) {
+            int vaultNum = start + i + 1;
+            if (vaultNum > max) break;
+            ItemStack chest = new ItemStack(Material.CHEST);
+            ItemMeta cm = chest.getItemMeta();
+            cm.setDisplayName(ChatColor.YELLOW + "Vault " + vaultNum);
+            chest.setItemMeta(cm);
+            gui.setItem(slots[i], chest);
         }
 
-        byNumber.put(vaultNumber, inv);
-        openVaultOwners.put(inv, ownerUuid);
-        openVaultNumbers.put(inv, vaultNumber);
-        return inv;
-    }
+        // Prev arrow
+        if (page > 0) {
+            ItemStack left = new ItemStack(Material.ARROW);
+            ItemMeta lm = left.getItemMeta();
+            lm.setDisplayName(ChatColor.GREEN + "Previous Page");
+            left.setItemMeta(lm);
+            gui.setItem(45, left);
+        }
 
-    private void openVault(Player viewer, UUID ownerUuid, int vaultNumber) {
-        Inventory inv = getOrCreateVault(ownerUuid, vaultNumber);
+        // Next arrow
+        if (page < pages - 1) {
+            ItemStack right = new ItemStack(Material.ARROW);
+            ItemMeta rm = right.getItemMeta();
+            rm.setDisplayName(ChatColor.GREEN + "Next Page");
+            right.setItemMeta(rm);
+            gui.setItem(53, right);
+        }
+
+        guiMap.put(gui, new OwnerPage(ownerUuid, page));
         if (viewer != null) {
-            inventoryViewers
-                    .computeIfAbsent(inv, k -> new HashSet<>())
-                    .add(viewer.getUniqueId());
-            viewer.openInventory(inv);
+            guiViewers.computeIfAbsent(gui, k -> new HashSet<>()).add(viewer.getUniqueId());
+            viewer.openInventory(gui);
         }
     }
 
     @EventHandler
-    public void onInventoryClose(InventoryCloseEvent event) {
-        Inventory inv = event.getInventory();
+    public void onInventoryClick(InventoryClickEvent e) {
+        Inventory inv = e.getInventory();
+        if (guiMap.containsKey(inv)) {
+            e.setCancelled(true);
+            OwnerPage op = guiMap.get(inv);
+            ItemStack clicked = e.getCurrentItem();
+            if (clicked == null || !clicked.hasItemMeta()) return;
+            String name = clicked.getItemMeta().getDisplayName();
+            if (name.equals(ChatColor.GREEN + "Previous Page")) {
+                openVaultsGui(op.owner, (Player) e.getWhoClicked(), op.page - 1);
+            } else if (name.equals(ChatColor.GREEN + "Next Page")) {
+                openVaultsGui(op.owner, (Player) e.getWhoClicked(), op.page + 1);
+            } else if (name.startsWith(ChatColor.YELLOW + "Vault ")) {
+                int vnum = Integer.parseInt(name.substring((ChatColor.YELLOW + "Vault ").length()));
+                openVault((Player) e.getWhoClicked(), op.owner, vnum);
+            }
+        }
+    }
+
+    @EventHandler
+    public void onInventoryClose(InventoryCloseEvent e) {
+        Inventory inv = e.getInventory();
+        if (guiMap.containsKey(inv)) {
+            guiMap.remove(inv);
+            guiViewers.remove(inv);
+            return;
+        }
         if (!inventoryViewers.containsKey(inv)) return;
-        UUID uid = event.getPlayer().getUniqueId();
+        UUID uid = e.getPlayer().getUniqueId();
         Set<UUID> viewers = inventoryViewers.get(inv);
         viewers.remove(uid);
         if (viewers.isEmpty()) {
@@ -253,32 +295,87 @@ public final class PrivateVaults extends JavaPlugin implements Listener, TabComp
             inventoryViewers.remove(inv);
             UUID owner = openVaultOwners.remove(inv);
             int num = openVaultNumbers.remove(inv);
-            Map<Integer, Inventory> byNumber = openVaultsByOwner.get(owner);
-            if (byNumber != null) {
-                byNumber.remove(num);
-                if (byNumber.isEmpty()) openVaultsByOwner.remove(owner);
+            Map<Integer, Inventory> byNum = openVaultsByOwner.get(owner);
+            if (byNum != null) {
+                byNum.remove(num);
+                if (byNum.isEmpty()) openVaultsByOwner.remove(owner);
             }
         }
     }
 
+    // --- Vault I/O & helpers ---
+
+    private void openVault(Player viewer, UUID owner, int num) {
+        Inventory inv = getOrCreateVault(owner, num);
+        if (viewer != null) {
+            inventoryViewers.computeIfAbsent(inv, k -> new HashSet<>()).add(viewer.getUniqueId());
+            viewer.openInventory(inv);
+        }
+    }
+
+    private Inventory getOrCreateVault(UUID owner, int num) {
+        Map<Integer, Inventory> byNum = openVaultsByOwner.computeIfAbsent(owner, k -> new HashMap<>());
+        if (byNum.containsKey(num)) return byNum.get(num);
+
+        int size = getVaultSize(num);
+        Inventory inv = Bukkit.createInventory(null, size, ChatColor.GREEN + "Vault " + num);
+
+        File f = new File(vaultsFolder, owner + "_" + num + ".yml");
+        YamlConfiguration vc = YamlConfiguration.loadConfiguration(f);
+        for (int i = 0; i < size; i++) {
+            ItemStack it = vc.getItemStack("slot." + i);
+            if (it != null) inv.setItem(i, it);
+        }
+
+        byNum.put(num, inv);
+        openVaultOwners.put(inv, owner);
+        openVaultNumbers.put(inv, num);
+        return inv;
+    }
+
     private void saveVault(Inventory inv) {
         UUID owner = openVaultOwners.get(inv);
-        int number = openVaultNumbers.get(inv);
-        File vaultFile = new File(vaultsFolder, owner + "_" + number + ".yml");
-        YamlConfiguration vcfg = new YamlConfiguration();
-
+        int num = openVaultNumbers.get(inv);
+        File f = new File(vaultsFolder, owner + "_" + num + ".yml");
+        YamlConfiguration vc = new YamlConfiguration();
         for (int i = 0; i < inv.getSize(); i++) {
-            ItemStack item = inv.getItem(i);
-            if (item != null) {
-                vcfg.set("slot." + i, item);
-            }
+            ItemStack it = inv.getItem(i);
+            if (it != null) vc.set("slot." + i, it);
         }
+        try { vc.save(f); }
+        catch (IOException e) { getLogger().severe("Could not save vault: " + e); }
+    }
 
-        try {
-            vcfg.save(vaultFile);
-        } catch (IOException e) {
-            getLogger().severe("Could not save vault " + owner + "_" + number);
-            e.printStackTrace();
-        }
+    private void listVaults(CommandSender s, Player t) {
+        int max = determineMaxVaults(t);
+        StringBuilder sb = new StringBuilder();
+        for (int i = 1; i <= max; i++) sb.append(i).append(", ");
+        if (sb.length() >= 2) sb.setLength(sb.length() - 2);
+        String hdr = ChatColor.GOLD + (s.equals(t) ? "Your vaults: " : t.getName() + "'s vaults: ");
+        s.sendMessage(hdr + ChatColor.GREEN + sb);
+    }
+
+    private int determineMaxVaults(Player p) {
+        int m = getConfig().getInt("vault-limits.normal", 2);
+        if (p.hasPermission("mamtak.pv.advanced"))  m = Math.max(m, getConfig().getInt("vault-limits.advanced", 4));
+        if (p.hasPermission("mamtak.pv.rich"))      m = Math.max(m, getConfig().getInt("vault-limits.rich", 6));
+        if (p.hasPermission("mamtak.pv.moderator")) m = Math.max(m, getConfig().getInt("vault-limits.moderator", 8));
+        if (p.hasPermission("mamtak.pv.admin"))     m = Math.max(m, getConfig().getInt("vault-limits.admin", 12));
+        if (p.hasPermission("mamtak.pv.owner"))     return Integer.MAX_VALUE;
+        return m;
+    }
+
+    private int getVaultSize(int num) {
+        int raw = getConfig().getInt("vault-sizes." + num,
+                getConfig().getInt("default-vault-size", 32));
+        int rows = (raw + 8) / 9;
+        return Math.max(9, Math.min(54, rows * 9));
+    }
+
+    private List<String> filter(List<String> list, String token) {
+        List<String> out = new ArrayList<>();
+        StringUtil.copyPartialMatches(token, list, out);
+        Collections.sort(out);
+        return out;
     }
 }
