@@ -1,5 +1,6 @@
+# plugin.yml
 name: PrivateVaults
-version: '1.0'
+version: '2.0'
 main: vault.mamtak.privateVaults.PrivateVaults
 api-version: '1.21'
 authors:
@@ -7,25 +8,28 @@ authors:
 
 commands:
   pv:
-    description: Open your private vault or reload config if you’re OP
-    usage: /pv <number> or /pv reload
+    description: Open a private vault, list available vaults, or reload config
+    usage: /pv <number> [player] | /pv list [player] | /pv reload
 
 permissions:
   mamtak.pv.normal:
-    description: Allows access to defined number of “normal” vaults (configurable)
+    description: Allows access to vaults up to vault-limits.normal
     default: true
   mamtak.pv.advanced:
-    description: Allows access to defined number of “advanced” vaults (configurable)
+    description: Allows access to vaults up to vault-limits.advanced
     default: false
   mamtak.pv.rich:
-    description: Allows access to defined number of “rich” vaults (configurable)
+    description: Allows access to vaults up to vault-limits.rich
     default: false
   mamtak.pv.moderator:
-    description: Allows access to defined number of “moderator” vaults (configurable)
+    description: Allows access to vaults up to vault-limits.moderator
     default: false
   mamtak.pv.admin:
-    description: Allows access to defined number of “admin” vaults (configurable)
+    description: Allows access to vaults up to vault-limits.admin
     default: false
   mamtak.pv.owner:
     description: Allows access to unlimited vaults
     default: false
+  mamtak.pv.adminaccess:
+    description: Allows listing and opening other players' vaults
+    default: op
