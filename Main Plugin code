@@ -2,8 +2,10 @@ package vault.mamtak.privateVaults;
 
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
+import org.bukkit.OfflinePlayer;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
+import org.bukkit.command.TabCompleter;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
@@ -12,18 +14,19 @@ import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.util.StringUtil;
 
 import java.io.File;
 import java.io.IOException;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.UUID;
+import java.util.*;
 
-public final class PrivateVaults extends JavaPlugin implements Listener {
+public final class PrivateVaults extends JavaPlugin implements Listener, TabCompleter {
 
+    private File vaultsFolder;
+    private final Map<UUID, Map<Integer, Inventory>> openVaultsByOwner = new HashMap<>();
     private final Map<Inventory, UUID> openVaultOwners = new HashMap<>();
     private final Map<Inventory, Integer> openVaultNumbers = new HashMap<>();
-    private File vaultsFolder;
+    private final Map<Inventory, Set<UUID>> inventoryViewers = new HashMap<>();
 
     @Override
     public void onEnable() {
@@ -31,125 +34,250 @@ public final class PrivateVaults extends JavaPlugin implements Listener {
         vaultsFolder = new File(getDataFolder(), "vaults");
         if (!vaultsFolder.exists()) vaultsFolder.mkdirs();
         getServer().getPluginManager().registerEvents(this, this);
+        Objects.requireNonNull(getCommand("pv")).setTabCompleter(this);
     }
 
     @Override
     public void onDisable() {
-        for (Inventory inv : openVaultOwners.keySet()) {
+        // Save all open vaults on shutdown
+        for (Inventory inv : new ArrayList<>(openVaultOwners.keySet())) {
             saveVault(inv);
         }
     }
 
     @Override
-    public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+    public boolean onCommand(CommandSender sender, Command cmd, String label, String[] args) {
+        // /pv reload
         if (args.length == 1 && args[0].equalsIgnoreCase("reload")) {
-            if (!(sender instanceof Player) || ((Player) sender).isOp()) {
+            if (sender.isOp()) {
                 reloadConfig();
-                sender.sendMessage(ChatColor.GREEN + "PrivateVaults config reloaded.");
+                sender.sendMessage(ChatColor.GREEN + "Config reloaded.");
             } else {
-                sender.sendMessage(ChatColor.RED + "Only operators can do that.");
+                sender.sendMessage(ChatColor.RED + "Only operators can reload.");
             }
             return true;
         }
 
-        if (!(sender instanceof Player)) {
-            sender.sendMessage("Only players can use /pv <number>.");
+        // /pv list [player]
+        if (args.length >= 1 && args[0].equalsIgnoreCase("list")) {
+            Player target;
+            if (args.length == 1) {
+                if (!(sender instanceof Player)) {
+                    sender.sendMessage(ChatColor.RED + "Only players can list their vaults.");
+                    return true;
+                }
+                target = (Player) sender;
+            } else {
+                if (!sender.hasPermission("mamtak.pv.adminaccess")) {
+                    sender.sendMessage(ChatColor.RED + "No permission to list others' vaults.");
+                    return true;
+                }
+                target = Bukkit.getPlayerExact(args[1]);
+                if (target == null) {
+                    sender.sendMessage(ChatColor.RED + "Player not found.");
+                    return true;
+                }
+            }
+            listVaults(sender, target);
             return true;
         }
 
-        Player player = (Player) sender;
-        if (args.length != 1) {
-            player.sendMessage(ChatColor.RED + "Usage: /pv <number> or /pv reload");
+        // /pv <number> [player]
+        if (args.length >= 1) {
+            int vaultNumber;
+            try {
+                vaultNumber = Integer.parseInt(args[0]);
+            } catch (NumberFormatException e) {
+                sender.sendMessage(ChatColor.RED + "Invalid vault number.");
+                return true;
+            }
+
+            Player viewer;
+            UUID ownerUuid;
+            if (args.length == 1) {
+                // Opening own vault
+                if (!(sender instanceof Player)) {
+                    sender.sendMessage(ChatColor.RED + "Only players can open vaults.");
+                    return true;
+                }
+                viewer = (Player) sender;
+                ownerUuid = viewer.getUniqueId();
+                int max = determineMaxVaults(viewer);
+                if (vaultNumber < 1 || vaultNumber > max) {
+                    sender.sendMessage(ChatColor.RED + "You don’t have access to that vault.");
+                    return true;
+                }
+            } else {
+                // Opening someone else's vault
+                if (!sender.hasPermission("mamtak.pv.adminaccess")) {
+                    sender.sendMessage(ChatColor.RED + "No permission to open others' vaults.");
+                    return true;
+                }
+                viewer = (sender instanceof Player) ? (Player) sender : null;
+                Player target = Bukkit.getPlayerExact(args[1]);
+                if (target == null) {
+                    sender.sendMessage(ChatColor.RED + "Player not found.");
+                    return true;
+                }
+                ownerUuid = target.getUniqueId();
+                int max = determineMaxVaults(target);
+                if (vaultNumber < 1 || vaultNumber > max) {
+                    sender.sendMessage(ChatColor.RED + target.getName() + " doesn’t have that vault.");
+                    return true;
+                }
+            }
+
+            openVault(viewer, ownerUuid, vaultNumber);
             return true;
         }
 
-        int vaultNumber;
-        try {
-            vaultNumber = Integer.parseInt(args[0]);
-        } catch (NumberFormatException e) {
-            player.sendMessage(ChatColor.RED + "Invalid vault number.");
-            return true;
-        }
-
-        int maxVaults = determineMaxVaults(player);
-        if (vaultNumber < 1 || vaultNumber > maxVaults) {
-            player.sendMessage(ChatColor.RED + "You don’t have access to that vault.");
-            return true;
-        }
-
-        openVault(player, vaultNumber);
+        sender.sendMessage(ChatColor.RED + "Usage: /pv <number> [player] | /pv list [player] | /pv reload");
         return true;
     }
 
-    private int determineMaxVaults(Player player) {
-        int base = getConfig().getInt("vault-limits.normal", 2);
-        int max = base;
+    // Tab completion: first arg only "reload" and "list"; second arg player names
+    @Override
+    public List<String> onTabComplete(CommandSender sender, Command cmd, String alias, String[] args) {
+        if (!cmd.getName().equalsIgnoreCase("pv")) return Collections.emptyList();
+        if (args.length == 1) {
+            return filter(Arrays.asList("reload", "list"), args[0]);
+        }
+        if (args.length == 2 && (args[0].equalsIgnoreCase("list") || isNumeric(args[0]))) {
+            List<String> players = new ArrayList<>();
+            for (Player p : Bukkit.getOnlinePlayers()) {
+                players.add(p.getName());
+            }
+            return filter(players, args[1]);
+        }
+        return Collections.emptyList();
+    }
 
-        if (player.hasPermission("mamtak.pv.advanced")) {
+    private List<String> filter(List<String> list, String token) {
+        List<String> result = new ArrayList<>();
+        StringUtil.copyPartialMatches(token, list, result);
+        Collections.sort(result);
+        return result;
+    }
+
+    private boolean isNumeric(String s) {
+        try {
+            Integer.parseInt(s);
+            return true;
+        } catch (NumberFormatException e) {
+            return false;
+        }
+    }
+
+    private void listVaults(CommandSender sender, Player target) {
+        int max = determineMaxVaults(target);
+        StringBuilder sb = new StringBuilder();
+        for (int i = 1; i <= max; i++) {
+            sb.append(i).append(", ");
+        }
+        if (sb.length() >= 2) sb.setLength(sb.length() - 2);
+        String header = ChatColor.GOLD + (sender.equals(target)
+                ? "Your vaults: "
+                : target.getName() + "'s vaults: ");
+        sender.sendMessage(header + ChatColor.GREEN + sb);
+    }
+
+    private int determineMaxVaults(Player player) {
+        int max = getConfig().getInt("vault-limits.normal", 2);
+        if (player.hasPermission("mamtak.pv.advanced"))
             max = Math.max(max, getConfig().getInt("vault-limits.advanced", 4));
-        }
-        if (player.hasPermission("mamtak.pv.rich")) {
+        if (player.hasPermission("mamtak.pv.rich"))
             max = Math.max(max, getConfig().getInt("vault-limits.rich", 6));
-        }
-        if (player.hasPermission("mamtak.pv.moderator")) {
+        if (player.hasPermission("mamtak.pv.moderator"))
             max = Math.max(max, getConfig().getInt("vault-limits.moderator", 8));
-        }
-        if (player.hasPermission("mamtak.pv.admin")) {
+        if (player.hasPermission("mamtak.pv.admin"))
             max = Math.max(max, getConfig().getInt("vault-limits.admin", 12));
-        }
-        if (player.hasPermission("mamtak.pv.owner")) {
+        if (player.hasPermission("mamtak.pv.owner"))
             return Integer.MAX_VALUE;
-        }
         return max;
     }
 
-    private void openVault(Player player, int vaultNumber) {
-        String title = ChatColor.GREEN + "Vault " + vaultNumber;
-        Inventory inv = Bukkit.createInventory(null, 54, title);
+    private int getVaultSize(int vaultNumber) {
+        int size = getConfig().getInt(
+                "vault-sizes." + vaultNumber,
+                getConfig().getInt("default-vault-size", 32)
+        );
+        size = Math.max(9, Math.min(54, size));
+        if (size % 9 != 0) {
+            size = ((size / 9) + 1) * 9;
+        }
+        return size;
+    }
 
-        UUID uuid = player.getUniqueId();
-        File vaultFile = new File(vaultsFolder, uuid + "_" + vaultNumber + ".yml");
-        YamlConfiguration vaultConfig = YamlConfiguration.loadConfiguration(vaultFile);
-
-        for (int i = 0; i < inv.getSize(); i++) {
-            String path = "slot." + i;
-            if (vaultConfig.contains(path)) {
-                inv.setItem(i, vaultConfig.getItemStack(path));
-            }
+    private Inventory getOrCreateVault(UUID ownerUuid, int vaultNumber) {
+        Map<Integer, Inventory> byNumber = openVaultsByOwner
+                .computeIfAbsent(ownerUuid, k -> new HashMap<>());
+        if (byNumber.containsKey(vaultNumber)) {
+            return byNumber.get(vaultNumber);
         }
 
-        openVaultOwners.put(inv, uuid);
+        int size = getVaultSize(vaultNumber);
+        Inventory inv = Bukkit.createInventory(null, size, ChatColor.GREEN + "Vault " + vaultNumber);
+
+        File vaultFile = new File(vaultsFolder, ownerUuid + "_" + vaultNumber + ".yml");
+        YamlConfiguration vcfg = YamlConfiguration.loadConfiguration(vaultFile);
+        for (int i = 0; i < size; i++) {
+            ItemStack item = vcfg.getItemStack("slot." + i);
+            if (item != null) inv.setItem(i, item);
+        }
+
+        byNumber.put(vaultNumber, inv);
+        openVaultOwners.put(inv, ownerUuid);
         openVaultNumbers.put(inv, vaultNumber);
-        player.openInventory(inv);
+        return inv;
+    }
+
+    private void openVault(Player viewer, UUID ownerUuid, int vaultNumber) {
+        Inventory inv = getOrCreateVault(ownerUuid, vaultNumber);
+        if (viewer != null) {
+            inventoryViewers
+                    .computeIfAbsent(inv, k -> new HashSet<>())
+                    .add(viewer.getUniqueId());
+            viewer.openInventory(inv);
+        }
     }
 
     @EventHandler
     public void onInventoryClose(InventoryCloseEvent event) {
         Inventory inv = event.getInventory();
-        if (openVaultOwners.containsKey(inv)) {
+        if (!inventoryViewers.containsKey(inv)) return;
+        UUID uid = event.getPlayer().getUniqueId();
+        Set<UUID> viewers = inventoryViewers.get(inv);
+        viewers.remove(uid);
+        if (viewers.isEmpty()) {
             saveVault(inv);
-            openVaultOwners.remove(inv);
-            openVaultNumbers.remove(inv);
+            inventoryViewers.remove(inv);
+            UUID owner = openVaultOwners.remove(inv);
+            int num = openVaultNumbers.remove(inv);
+            Map<Integer, Inventory> byNumber = openVaultsByOwner.get(owner);
+            if (byNumber != null) {
+                byNumber.remove(num);
+                if (byNumber.isEmpty()) openVaultsByOwner.remove(owner);
+            }
         }
     }
 
     private void saveVault(Inventory inv) {
-        UUID uuid = openVaultOwners.get(inv);
-        int vaultNumber = openVaultNumbers.get(inv);
-        File vaultFile = new File(vaultsFolder, uuid + "_" + vaultNumber + ".yml");
-        YamlConfiguration vaultConfig = new YamlConfiguration();
+        UUID owner = openVaultOwners.get(inv);
+        int number = openVaultNumbers.get(inv);
+        File vaultFile = new File(vaultsFolder, owner + "_" + number + ".yml");
+        YamlConfiguration vcfg = new YamlConfiguration();
 
         for (int i = 0; i < inv.getSize(); i++) {
             ItemStack item = inv.getItem(i);
             if (item != null) {
-                vaultConfig.set("slot." + i, item);
+                vcfg.set("slot." + i, item);
             }
         }
 
         try {
-            vaultConfig.save(vaultFile);
+            vcfg.save(vaultFile);
         } catch (IOException e) {
-            getLogger().severe("Could not save vault " + uuid + "_" + vaultNumber);
+            getLogger().severe("Could not save vault " + owner + "_" + number);
             e.printStackTrace();
         }
     }
